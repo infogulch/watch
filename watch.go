@@ -11,6 +11,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+var Log = slog.Default()
+
 // WatchDirs waits for changes to any of the directories in `dirs`
 // (recursively), then waits for `debounce` delay until no more changes occurr
 // and sends a value on the `changed` channel. Send a value to `halt` to stop
@@ -26,14 +28,10 @@ import (
 // watch/unwatch directories as their events are received. A result of this
 // design is that it may not be suited to watching thousands of directories, or
 // directories that change frequently.
-func WatchDirs(dirs []string, debounce time.Duration, log *slog.Logger) (changed <-chan struct{}, halt chan<- struct{}, err error) {
+func WatchDirs(dirs []string, debounce time.Duration) (changed <-chan struct{}, halt chan<- struct{}, err error) {
 	if len(dirs) == 0 {
 		err = fmt.Errorf("empty watchPaths")
 		return
-	}
-
-	if log == nil {
-		log = slog.Default()
 	}
 
 	startwatcher := func() (*fsnotify.Watcher, error) {
@@ -60,7 +58,7 @@ func WatchDirs(dirs []string, debounce time.Duration, log *slog.Logger) (changed
 				return nil, fmt.Errorf("failed scanning for directories: %w", err)
 			}
 		}
-		log.Debug("found directories to watch", "count", count, "rootdirs", dirs)
+		Log.Debug("found directories to watch", "count", count, "rootdirs", dirs)
 		return watcher, nil
 	}
 
@@ -82,7 +80,7 @@ func WatchDirs(dirs []string, debounce time.Duration, log *slog.Logger) (changed
 			goto halt
 		}
 		timer = time.NewTimer(debounce)
-		log.Debug("event received, debouncing", "duration", debounce)
+		Log.Debug("event received, debouncing", "duration", debounce)
 
 	debounce:
 		select {
@@ -105,13 +103,13 @@ func WatchDirs(dirs []string, debounce time.Duration, log *slog.Logger) (changed
 		{
 			newwatcher, err := startwatcher()
 			if err != nil {
-				log.Info("failed to start new fsnotify watcher", "error", err)
+				Log.Info("failed to start new fsnotify watcher", "error", err)
 			} else {
 				err = watcher.Close()
 				if err != nil {
-					log.Info("error while stopping fsnotify watcher", "error", err)
+					Log.Info("error while stopping fsnotify watcher", "error", err)
 				}
-				log.Debug("starting new fsnotify watcher")
+				Log.Debug("starting new fsnotify watcher")
 				watcher = newwatcher
 			}
 		}
@@ -120,8 +118,25 @@ func WatchDirs(dirs []string, debounce time.Duration, log *slog.Logger) (changed
 	halt:
 		watcher.Close()
 		close(changed_)
-		log.Debug("watcher stopped")
+		Log.Debug("watcher stopped")
 	}()
 
 	return changed_, halt_, nil
+}
+
+func React(changed <-chan struct{}, halt chan<- struct{}, do func() (halt bool)) {
+	go func() {
+		for {
+			select {
+			case _, ok := <-changed:
+				if !ok {
+					return
+				}
+				halt_ := do()
+				if halt_ {
+					halt <- struct{}{}
+				}
+			}
+		}
+	}()
 }

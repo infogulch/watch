@@ -13,7 +13,7 @@ func TestWatchDirs(t *testing.T) {
 	unit := 100 * time.Millisecond
 	epsilon := 10 * time.Millisecond
 
-	changed, halt, err := WatchDirs([]string{"test"}, 3*unit, nil)
+	changed, halt, err := WatchDirs([]string{"test"}, 3*unit)
 	if err != nil {
 		t.Fatalf("failed to watch 'test' dir: %v", err)
 	}
