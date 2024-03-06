@@ -11,12 +11,10 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-var Log = slog.Default()
-
-// WatchDirs waits for changes to any of the directories in `dirs`
-// (recursively), then waits for `debounce` delay until no more changes occurr
-// and sends a value on the `changed` channel. Send a value to `halt` to stop
-// it. Provide an optional logger.
+// Watch waits for changes to any of the directories in `dirs` (recursively),
+// delays for `debounce` duration until no changes occurr within the window, and
+// then calls onchange. Send a value to `halt` to exit early and cancel the
+// watcher. Provide an optional logger.
 //
 // After the first change event arrives, wait for further events until
 // `debounce` delay passes with no events. This 'debounce' check tries to avoid
@@ -28,10 +26,13 @@ var Log = slog.Default()
 // watch/unwatch directories as their events are received. A result of this
 // design is that it may not be suited to watching thousands of directories, or
 // directories that change frequently.
-func WatchDirs(dirs []string, debounce time.Duration) (changed <-chan struct{}, halt chan<- struct{}, err error) {
+func Watch(dirs []string, debounce time.Duration, log *slog.Logger, onchange func() bool) (halt chan<- struct{}, err error) {
 	if len(dirs) == 0 {
 		err = fmt.Errorf("empty watchPaths")
 		return
+	}
+	if log == nil {
+		log = slog.Default()
 	}
 
 	startwatcher := func() (*fsnotify.Watcher, error) {
@@ -58,7 +59,7 @@ func WatchDirs(dirs []string, debounce time.Duration) (changed <-chan struct{}, 
 				return nil, fmt.Errorf("failed scanning for directories: %w", err)
 			}
 		}
-		Log.Debug("found directories to watch", "count", count, "rootdirs", dirs)
+		log.Debug("found directories to watch", "count", count, "rootdirs", dirs)
 		return watcher, nil
 	}
 
@@ -67,8 +68,7 @@ func WatchDirs(dirs []string, debounce time.Duration) (changed <-chan struct{}, 
 		return
 	}
 
-	halt_ := make(chan struct{})
-	changed_ := make(chan struct{})
+	halt_ := make(chan struct{}, 1)
 
 	go func() {
 		var timer *time.Timer
@@ -80,7 +80,7 @@ func WatchDirs(dirs []string, debounce time.Duration) (changed <-chan struct{}, 
 			goto halt
 		}
 		timer = time.NewTimer(debounce)
-		Log.Debug("event received, debouncing", "duration", debounce)
+		log.Debug("event received, debouncing", "duration", debounce)
 
 	debounce:
 		select {
@@ -96,20 +96,21 @@ func WatchDirs(dirs []string, debounce time.Duration) (changed <-chan struct{}, 
 			// only fall through if the timer expires first
 		}
 
-		// signal a change occurred
-		changed_ <- struct{}{}
+		if ok := onchange(); !ok {
+			goto halt
+		}
 
 		// try to rebuild watcher since there could be new subdirs.
 		{
 			newwatcher, err := startwatcher()
 			if err != nil {
-				Log.Info("failed to start new fsnotify watcher", "error", err)
+				log.Info("failed to start new fsnotify watcher", "error", err)
 			} else {
 				err = watcher.Close()
 				if err != nil {
-					Log.Info("error while stopping fsnotify watcher", "error", err)
+					log.Info("error while stopping fsnotify watcher", "error", err)
 				}
-				Log.Debug("starting new fsnotify watcher")
+				log.Debug("starting new fsnotify watcher")
 				watcher = newwatcher
 			}
 		}
@@ -117,26 +118,8 @@ func WatchDirs(dirs []string, debounce time.Duration) (changed <-chan struct{}, 
 
 	halt:
 		watcher.Close()
-		close(changed_)
-		Log.Debug("watcher stopped")
+		log.Debug("watcher stopped")
 	}()
 
-	return changed_, halt_, nil
-}
-
-func React(changed <-chan struct{}, halt chan<- struct{}, do func() (halt bool)) {
-	go func() {
-		for {
-			select {
-			case _, ok := <-changed:
-				if !ok {
-					return
-				}
-				halt_ := do()
-				if halt_ {
-					halt <- struct{}{}
-				}
-			}
-		}
-	}()
+	return halt_, nil
 }
